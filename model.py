@@ -392,95 +392,6 @@ def preprocess_image(image, target_size=(512, 512)):
     
     return image_tensor, original_size, image_vis
 
-# def preprocess_image_debug(image, target_size=(512, 512)):
-#     """
-#     Debug version that shows preprocessing statistics
-#     """
-#     # ... (same preprocessing as above)
-    
-#     # Add debug information
-#     st.write("### Preprocessing Debug Info:")
-#     st.write(f"Original image shape: {np.array(image).shape}")
-#     st.write(f"Resized image shape: {np.array(image_resized).shape}")
-#     st.write(f"Final tensor shape: {image_tensor.shape}")
-    
-#     # Show pixel value ranges
-#     image_array_vis = np.array(image_resized).astype(np.float32) / 255.0
-#     st.write(f"Original pixel range: [{image_array_vis.min():.3f}, {image_array_vis.max():.3f}]")
-#     st.write(f"Normalized pixel range: [{image_array.min():.3f}, {image_array.max():.3f}]")
-    
-#     # Show sample of normalized values
-#     st.write("Sample normalized pixel values (first 5x5 patch, R channel):")
-#     st.write(image_array[:5, :5, 0])
-    
-#     return image_tensor, original_size, image_vis
-
-# # Alternative preprocessing functions for different normalization schemes:
-
-# def preprocess_image_simple_norm(image, target_size=(512, 512)):
-#     """Simple [0,1] normalization - try this if ImageNet norm doesn't work"""
-#     # ... (same setup code)
-    
-#     # Simple normalization to [0,1]
-#     image_array = np.array(image_resized).astype(np.float32) / 255.0
-    
-#     # Convert to tensor
-#     image_tensor = torch.from_numpy(image_array)
-#     image_tensor = image_tensor.permute(2, 0, 1)
-#     image_tensor = image_tensor.unsqueeze(0)
-    
-#     return image_tensor, original_size, image_vis
-
-# def preprocess_image_neg_one_to_one(image, target_size=(512, 512)):
-#     """[-1,1] normalization - common for some training setups"""
-#     # ... (same setup code)
-    
-#     # Normalize to [-1,1]
-#     image_array = np.array(image_resized).astype(np.float32)
-#     image_array = (image_array / 255.0) * 2.0 - 1.0
-    
-#     # Convert to tensor
-#     image_tensor = torch.from_numpy(image_array)
-#     image_tensor = image_tensor.permute(2, 0, 1)
-#     image_tensor = image_tensor.unsqueeze(0)
-    
-#     return image_tensor, original_size, image_vis
-
-# def preprocess_image_satellite_specific(image, target_size=(512, 512)):
-#     """
-#     Satellite-specific preprocessing with potential band adjustments
-#     """
-#     # ... (same setup code)
-    
-#     image_array = np.array(image_resized).astype(np.float32)
-    
-#     # Check if this is a satellite image that might need contrast adjustment
-#     # Sometimes satellite images have different dynamic ranges
-    
-#     # Option 1: Histogram equalization per channel
-#     for i in range(3):
-#         channel = image_array[:, :, i]
-#         # Normalize to 0-255 for CLAHE
-#         channel_uint8 = ((channel / channel.max()) * 255).astype(np.uint8)
-#         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-#         channel_eq = clahe.apply(channel_uint8)
-#         image_array[:, :, i] = channel_eq.astype(np.float32)
-    
-#     # Now normalize to [0,1]
-#     image_array = image_array / 255.0
-    
-#     # Apply ImageNet normalization
-#     mean = np.array([0.485, 0.456, 0.406])
-#     std = np.array([0.229, 0.224, 0.225])
-#     image_array = (image_array - mean) / std
-    
-#     # Convert to tensor
-#     image_tensor = torch.from_numpy(image_array)
-#     image_tensor = image_tensor.permute(2, 0, 1)
-#     image_tensor = image_tensor.unsqueeze(0)
-    
-#     return image_tensor, original_size, image_vis
-
 def predict_with_model_refined(model, image, device, select_classes, select_class_rgb_values, target_size=(512, 512)):
     """
     Run prediction on preprocessed image - refined to match your script approach
@@ -502,7 +413,7 @@ def predict_with_model_refined(model, image, device, select_classes, select_clas
     try:
         # Preprocess image
         image_tensor, original_size, image_vis = preprocess_image(image, target_size)
-        image_tensor = image_tensor.to(device)
+        image_tensor = image_tensor.float().to(device) 
         
         st.info(f"Input tensor shape: {image_tensor.shape}")
         
