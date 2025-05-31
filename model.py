@@ -300,9 +300,32 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
         st.error(f"General error loading model: {str(e)}")
         return None, None
 
+def reverse_one_hot(one_hot_mask):
+    """
+    Convert one-hot encoded mask back to categorical mask
+    Args:
+        one_hot_mask: numpy array of shape (H, W, num_classes)
+    Returns:
+        categorical_mask: numpy array of shape (H, W) with class indices
+    """
+    return np.argmax(one_hot_mask, axis=-1)
+
+def colour_code_segmentation(image, label_values):
+    """
+    Apply color coding to segmentation mask
+    Args:
+        image: numpy array of shape (H, W) with class indices
+        label_values: list of RGB color values for each class
+    Returns:
+        colored_mask: numpy array of shape (H, W, 3) with RGB colors
+    """
+    colour_codes = np.array(label_values)
+    x = colour_codes[image.astype(int)]
+    return x
+
 def preprocess_image(image, target_size=(512, 512)):
     """
-    Preprocess image for DeepLabV3Plus model
+    Preprocess image for DeepLabV3Plus model - refined version
     
     Args:
         image: PIL Image, numpy array, or file path
@@ -311,6 +334,7 @@ def preprocess_image(image, target_size=(512, 512)):
     Returns:
         preprocessed_tensor: torch tensor ready for model
         original_size: tuple of original (height, width) for post-processing
+        image_vis: original image as uint8 numpy array for visualization
     """
     
     # Ensure target size is divisible by 16
@@ -333,53 +357,56 @@ def preprocess_image(image, target_size=(512, 512)):
     elif not isinstance(image, Image.Image):
         raise ValueError("Image must be PIL Image, numpy array, or file path")
     
-    # Store original size for later use
+    # Store original size and create visualization image
     original_size = image.size  # PIL returns (width, height)
     original_size = (original_size[1], original_size[0])  # Convert to (height, width)
+    image_vis = np.array(image).astype('uint8')  # For visualization
     
     # Resize image to target size
-    image = image.resize((target_size[1], target_size[0]), Image.BILINEAR)  # PIL resize takes (width, height)
+    image_resized = image.resize((target_size[1], target_size[0]), Image.BILINEAR)  # PIL resize takes (width, height)
     
-    # Convert to numpy array
-    image_array = np.array(image)
+    # Convert to numpy array and normalize
+    image_array = np.array(image_resized).astype(np.float32) / 255.0
     
-    # Normalize to [0, 1] range
-    image_array = image_array.astype(np.float32) / 255.0
-    
-    # Convert to tensor and add batch dimension
-    # Shape should be (1, 3, height, width)
+    # Convert to tensor format matching your script
+    # Your script expects format for model input
     image_tensor = torch.from_numpy(image_array)
     image_tensor = image_tensor.permute(2, 0, 1)  # HWC to CHW
     image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension
     
-    return image_tensor, original_size
+    return image_tensor, original_size, image_vis
 
-def predict_with_model(model, image, device, target_size=(512, 512)):
+def predict_with_model_refined(model, image, device, select_classes, select_class_rgb_values, target_size=(512, 512)):
     """
-    Run prediction on preprocessed image with enhanced error handling
+    Run prediction on preprocessed image - refined to match your script approach
     
     Args:
         model: trained DeepLabV3Plus model
         image: input image (PIL, numpy array, or path)
         device: torch device
+        select_classes: list of class names (e.g., ['urban_land', 'agriculture_land', ...])
+        select_class_rgb_values: list of RGB color values for each class
         target_size: target size for model input
     
     Returns:
-        prediction: numpy array of predicted segmentation mask
+        pred_mask_colored: colored prediction mask
+        pred_class_heatmaps: dictionary of heatmaps for each class
         original_size: original image dimensions
+        image_vis: original image for visualization
     """
     try:
         # Preprocess image
-        image_tensor, original_size = preprocess_image(image, target_size)
+        image_tensor, original_size, image_vis = preprocess_image(image, target_size)
         image_tensor = image_tensor.to(device)
         
         st.info(f"Input tensor shape: {image_tensor.shape}")
         
-        # Run prediction with enhanced error handling
+        # Run prediction
+        model.eval()
         with torch.no_grad():
             try:
-                # Direct model call
-                output = model(image_tensor)
+                # Get model output
+                pred_mask = model(image_tensor)
                 st.success("Model prediction successful")
             except Exception as prediction_error:
                 st.error(f"Prediction failed: {prediction_error}")
@@ -396,107 +423,238 @@ def predict_with_model(model, image, device, target_size=(512, 512)):
                                 model.encoder._out_channels = [64, 128, 256, 512]
                         
                         # Retry prediction
-                        output = model(image_tensor)
+                        pred_mask = model(image_tensor)
                         st.success("Prediction successful after fix!")
                         
                     except Exception as retry_error:
                         st.error(f"Retry failed: {retry_error}")
-                        return None, None
+                        return None, None, None, None
                 else:
-                    st.error("Prediction failed with unrecognized error")
-                    return None, None
+                    return None, None, None, None
             
             # Handle different output formats
-            if isinstance(output, dict):
-                if 'out' in output:
-                    output = output['out']
-                elif 'logits' in output:
-                    output = output['logits']
+            if isinstance(pred_mask, dict):
+                if 'out' in pred_mask:
+                    pred_mask = pred_mask['out']
+                elif 'logits' in pred_mask:
+                    pred_mask = pred_mask['logits']
                 else:
-                    # Take the first value if it's a dict
-                    output = list(output.values())[0]
-            elif isinstance(output, (list, tuple)):
-                output = output[0]
+                    pred_mask = list(pred_mask.values())[0]
+            elif isinstance(pred_mask, (list, tuple)):
+                pred_mask = pred_mask[0]
             
-            st.info(f"Model output shape: {output.shape}")
+            # Move to CPU and remove batch dimension
+            pred_mask = pred_mask.detach().squeeze().cpu().numpy()
             
-            # Ensure output has correct dimensions
-            if len(output.shape) == 3:
-                output = output.unsqueeze(0)
+            st.info(f"Model output shape after squeeze: {pred_mask.shape}")
             
-            # Get predicted class for each pixel
-            prediction = torch.argmax(output, dim=1)  # Shape: (1, H, W)
-            prediction = prediction.squeeze(0).cpu().numpy()  # Remove batch dim and move to CPU
+            # Convert from CHW to HWC format (matching your script)
+            if len(pred_mask.shape) == 3 and pred_mask.shape[0] == len(select_classes):
+                pred_mask = np.transpose(pred_mask, (1, 2, 0))  # CHW to HWC
+                st.info(f"Converted to HWC format: {pred_mask.shape}")
+            else:
+                st.warning(f"Unexpected prediction shape: {pred_mask.shape}")
+                # Handle case where output might already be in HWC or different format
+                if len(pred_mask.shape) == 2:
+                    # Single channel output - convert to one-hot
+                    num_classes = len(select_classes)
+                    pred_one_hot = np.zeros((pred_mask.shape[0], pred_mask.shape[1], num_classes))
+                    for i in range(num_classes):
+                        pred_one_hot[:, :, i] = (pred_mask == i).astype(float)
+                    pred_mask = pred_one_hot
+                elif pred_mask.shape[-1] != len(select_classes):
+                    st.error(f"Output channels ({pred_mask.shape[-1]}) don't match number of classes ({len(select_classes)})")
+                    return None, None, None, None
             
-            st.info(f"Prediction shape: {prediction.shape}")
-            st.info(f"Unique classes in prediction: {np.unique(prediction)}")
+            # Extract heatmaps for each class (matching your script)
+            pred_class_heatmaps = {}
+            for class_name in select_classes:
+                if class_name in select_classes:
+                    class_idx = select_classes.index(class_name)
+                    if class_idx < pred_mask.shape[-1]:
+                        pred_class_heatmaps[class_name] = pred_mask[:, :, class_idx]
+            
+            # Convert to categorical mask and apply color coding (matching your script)
+            pred_mask_categorical = reverse_one_hot(pred_mask)
+            pred_mask_colored = colour_code_segmentation(pred_mask_categorical, select_class_rgb_values)
+            
+            # Resize back to original size if needed
+            if original_size != target_size:
+                pred_mask_colored = cv2.resize(
+                    pred_mask_colored.astype(np.uint8),
+                    (original_size[1], original_size[0]),  # cv2.resize expects (width, height)
+                    interpolation=cv2.INTER_NEAREST
+                )
+                
+                # Resize heatmaps too
+                for class_name in pred_class_heatmaps:
+                    pred_class_heatmaps[class_name] = cv2.resize(
+                        pred_class_heatmaps[class_name],
+                        (original_size[1], original_size[0]),
+                        interpolation=cv2.INTER_LINEAR
+                    )
+                
+                # Resize visualization image to match
+                if image_vis.shape[:2] != original_size:
+                    image_vis = cv2.resize(
+                        image_vis,
+                        (original_size[1], original_size[0]),
+                        interpolation=cv2.INTER_LINEAR
+                    )
+            
+            st.info(f"Final prediction shape: {pred_mask_colored.shape}")
+            st.info(f"Unique classes in prediction: {np.unique(pred_mask_categorical)}")
         
-        return prediction, original_size
+        return pred_mask_colored, pred_class_heatmaps, original_size, image_vis
         
     except Exception as e:
         st.error(f"Error during prediction: {str(e)}")
-        return None, None
+        return None, None, None, None
 
-def resize_prediction_to_original(prediction, original_size, target_size):
+def complete_prediction_pipeline_refined(model, image, device, select_classes, select_class_rgb_values, target_size=(512, 512)):
     """
-    Resize prediction back to original image size
+    Complete pipeline matching your script's approach
     
     Args:
-        prediction: numpy array of predicted mask
-        original_size: tuple (height, width) of original image
-        target_size: tuple (height, width) of model input size
+        model: trained model
+        image: input image
+        device: torch device
+        select_classes: list of class names
+        select_class_rgb_values: list of RGB values for each class
+        target_size: model input size
     
     Returns:
-        resized_prediction: prediction resized to original dimensions
-    """
-    if prediction is None:
-        return None
-        
-    # Resize prediction back to original size
-    prediction_resized = cv2.resize(
-        prediction.astype(np.uint8), 
-        (original_size[1], original_size[0]),  # cv2.resize expects (width, height)
-        interpolation=cv2.INTER_NEAREST  # Use nearest neighbor for class labels
-    )
-    
-    return prediction_resized
-
-def complete_prediction_pipeline(model, image, device, target_size=(512, 512)):
-    """
-    Complete pipeline: preprocess -> predict -> resize back to original
+        dict containing all prediction results
     """
     # Run prediction
-    prediction, original_size = predict_with_model(model, image, device, target_size)
+    pred_mask_colored, pred_class_heatmaps, original_size, image_vis = predict_with_model_refined(
+        model, image, device, select_classes, select_class_rgb_values, target_size
+    )
     
-    if prediction is None:
+    if pred_mask_colored is None:
         return None
     
-    # Resize back to original size
-    final_prediction = resize_prediction_to_original(prediction, original_size, target_size)
-    
-    return final_prediction
+    return {
+        'original_image': image_vis,
+        'predicted_mask': pred_mask_colored,
+        'class_heatmaps': pred_class_heatmaps,
+        'original_size': original_size
+    }
 
-def colorize_prediction(prediction, color_map):
-    """Convert prediction mask to colored image"""
-    h, w = prediction.shape
-    colored = np.zeros((h, w, 3), dtype=np.uint8)
+def visualize_predictions(original_image, predicted_mask, class_heatmaps, select_classes):
+    """
+    Visualize predictions similar to your script
     
-    for i, color in enumerate(color_map):
-        colored[prediction == i] = color
+    Args:
+        original_image: original image as numpy array
+        predicted_mask: colored prediction mask
+        class_heatmaps: dictionary of class heatmaps
+        select_classes: list of class names
+    """
+    # Display original and prediction side by side
+    col1, col2 = st.columns(2)
     
-    return colored
+    with col1:
+        st.subheader("Original Image")
+        st.image(original_image, use_container_width=True)
+    
+    with col2:
+        st.subheader("Predicted Land Cover")
+        st.image(predicted_mask, use_container_width=True)
+    
+    # Display individual class heatmaps
+    if class_heatmaps:
+        st.subheader("Class Probability Heatmaps")
+        
+        # Create columns for heatmaps
+        num_classes = len(select_classes)
+        cols = st.columns(min(num_classes, 4))  # Max 4 columns
+        
+        for i, class_name in enumerate(select_classes):
+            col_idx = i % len(cols)
+            
+            if class_name in class_heatmaps:
+                with cols[col_idx]:
+                    st.write(f"**{class_name.replace('_', ' ').title()}**")
+                    
+                    # Normalize heatmap for display
+                    heatmap = class_heatmaps[class_name]
+                    heatmap_normalized = ((heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8) * 255).astype(np.uint8)
+                    
+                    # Apply colormap
+                    heatmap_colored = cv2.applyColorMap(heatmap_normalized, cv2.COLORMAP_JET)
+                    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+                    
+                    st.image(heatmap_colored, use_container_width=True)
 
-def get_class_distribution(prediction):
-    """Calculate class distribution in the prediction"""
-    unique, counts = np.unique(prediction, return_counts=True)
-    total_pixels = prediction.size
+def get_class_distribution_refined(pred_mask_colored, select_class_rgb_values, select_classes):
+    """
+    Calculate class distribution from colored prediction mask
+    
+    Args:
+        pred_mask_colored: colored prediction mask
+        select_class_rgb_values: RGB values for each class
+        select_classes: class names
+    
+    Returns:
+        distribution: dictionary with class percentages
+    """
+    # Convert colored mask back to categorical
+    h, w = pred_mask_colored.shape[:2]
+    pred_categorical = np.zeros((h, w), dtype=np.int32)
+    
+    for i, rgb_value in enumerate(select_class_rgb_values):
+        # Find pixels matching this RGB value
+        mask = np.all(pred_mask_colored == rgb_value, axis=-1)
+        pred_categorical[mask] = i
+    
+    # Calculate distribution
+    unique, counts = np.unique(pred_categorical, return_counts=True)
+    total_pixels = pred_categorical.size
     
     distribution = {}
     for class_idx, count in zip(unique, counts):
-        if class_idx < len(CLASS_NAMES):
-            distribution[CLASS_NAMES[class_idx]] = (count / total_pixels) * 100
+        if class_idx < len(select_classes):
+            class_name = select_classes[class_idx].replace('_', ' ').title()
+            distribution[class_name] = (count / total_pixels) * 100
     
     return distribution
+
+# Example usage in your Streamlit app:
+"""
+# Define your classes and colors (matching your training setup)
+select_classes = ['urban_land', 'agriculture_land', 'rangeland', 'forest_land', 'water', 'barren_land', 'unknown']
+select_class_rgb_values = [
+    [0, 255, 255],      # Urban - Cyan
+    [255, 255, 0],      # Agriculture - Yellow  
+    [255, 0, 255],      # Rangeland - Magenta
+    [0, 255, 0],        # Forest - Green
+    [0, 0, 255],        # Water - Blue
+    [255, 255, 255],    # Barren - White
+    [0, 0, 0]           # Unknown - Black
+]
+
+# Use the refined prediction pipeline
+results = complete_prediction_pipeline_refined(
+    model, image, device, select_classes, select_class_rgb_values, target_size=(512, 512)
+)
+
+if results:
+    # Visualize results
+    visualize_predictions(
+        results['original_image'],
+        results['predicted_mask'], 
+        results['class_heatmaps'],
+        select_classes
+    )
+    
+    # Get class distribution
+    distribution = get_class_distribution_refined(
+        results['predicted_mask'], 
+        select_class_rgb_values, 
+        select_classes
+    )
+"""
 
 # Initialize Google Earth Engine
 @st.cache_resource
