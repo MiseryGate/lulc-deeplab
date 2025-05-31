@@ -52,12 +52,35 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
         
         # Try loading the complete model first (as you saved it with torch.save(model, 'best_model.pth'))
         try:
+            # Import segmentation_models_pytorch to make classes available
+            import segmentation_models_pytorch as smp
+            
+            # Add safe globals for the specific classes you need
+            torch.serialization.add_safe_globals([
+                smp.encoders.mobilenet.MobileNetV2Encoder,
+                smp.DeepLabV3Plus,
+                # Add other classes if needed based on your model architecture
+            ])
+            
+            # Load with weights_only=True (default in PyTorch 2.6+)
             model = torch.load(model_path, map_location=device)
+            
             if hasattr(model, 'eval'):
                 model.eval()
                 return model, device
+                
         except Exception as e1:
-            st.warning(f"Could not load complete model: {str(e1)}")
+            st.warning(f"Could not load complete model with safe globals: {str(e1)}")
+            
+            # Fallback: try with weights_only=False (only if you trust the source)
+            try:
+                model = torch.load(model_path, map_location=device, weights_only=False)
+                if hasattr(model, 'eval'):
+                    model.eval()
+                    st.warning("Loaded model with weights_only=False. Ensure you trust the model source.")
+                    return model, device
+            except Exception as e2:
+                st.warning(f"Could not load complete model with weights_only=False: {str(e2)}")
         
         # If complete model loading fails, try loading as state dict
         try:
@@ -71,8 +94,13 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
                 activation=activation,
             )
             
-            # Load checkpoint
-            checkpoint = torch.load(model_path, map_location=device)
+            # Load checkpoint with weights_only=True (safer for state dicts)
+            try:
+                checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+            except Exception:
+                # Fallback to weights_only=False if needed
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                st.warning("Loaded checkpoint with weights_only=False. Ensure you trust the model source.")
             
             # Handle different checkpoint formats
             if isinstance(checkpoint, dict):
