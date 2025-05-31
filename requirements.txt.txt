@@ -1,0 +1,14 @@
+tensorflow
+folium
+streamlit
+torch
+torchvision
+pillow
+numpy
+matplotlib
+earthengine-api
+geemap
+folium
+requests
+opencv-python
+pandas
