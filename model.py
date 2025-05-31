@@ -847,32 +847,50 @@ if uploaded_model is not None:
                     st.image(image, use_container_width=True)  # Fixed deprecated parameter
                 
                 # Preprocess and predict
-                with st.spinner("Processing image..."):
-                    try:
-                        # Use the complete pipeline
-                        target_size = (512, 512)  # Divisible by 16
-                        
-                        pred_mask = complete_prediction_pipeline(model, image, device, target_size)
-                        
-                        if pred_mask is not None:
-                            # Colorize prediction
-                            colored_pred = colorize_prediction(pred_mask, COLOR_MAP)
+                # Define your classes and colors (matching your training setup)
+                    select_classes = ['urban_land', 'agriculture_land', 'rangeland', 'forest_land', 'water', 'barren_land', 'unknown']
+                    select_class_rgb_values = [
+                        [0, 255, 255],      # Urban - Cyan
+                        [255, 255, 0],      # Agriculture - Yellow  
+                        [255, 0, 255],      # Rangeland - Magenta
+                        [0, 255, 0],        # Forest - Green
+                        [0, 0, 255],        # Water - Blue
+                        [255, 255, 255],    # Barren - White
+                        [0, 0, 0]           # Unknown - Black
+                    ]
+
+                    # Preprocess and predict
+                    with st.spinner("Processing image..."):
+                        try:
+                            target_size = (512, 512)  # Divisible by 16
                             
-                            with col2:
-                                st.subheader("Land Cover Prediction")
-                                st.image(colored_pred, use_container_width=True)  # Fixed deprecated parameter
+                            results = complete_prediction_pipeline_refined(
+                                model, image, device, select_classes, select_class_rgb_values, target_size
+                            )
+                            
+                            if results:
+                                # Visualize results
+                                visualize_predictions(
+                                    results['original_image'],
+                                    results['predicted_mask'], 
+                                    results['class_heatmaps'],
+                                    select_classes
+                                )
+                            else:
+                                st.error("Failed to make prediction. Please check your model and try again.")
+                                st.stop()
                                 
-                        else:
-                            st.error("Failed to make prediction. Please check your model and try again.")
+                        except Exception as e:
+                            st.error(f"Error during prediction: {str(e)}")
                             st.stop()
-                            
-                    except Exception as e:
-                        st.error(f"Error during prediction: {str(e)}")
-                        st.stop()
-                
-                # Class distribution
-                st.subheader("Land Cover Distribution")
-                distribution = get_class_distribution(pred_mask)
+
+                    # Class distribution
+                    st.subheader("Land Cover Distribution")  
+                    distribution = get_class_distribution_refined(
+                        results['predicted_mask'], 
+                        select_class_rgb_values, 
+                        select_classes
+                    )
                 
                 # Create bar chart
                 fig, ax = plt.subplots(figsize=(10, 6))
@@ -982,10 +1000,16 @@ if uploaded_model is not None:
                     for i, file in enumerate(uploaded_files):
                         try:
                             image = Image.open(file).convert('RGB')
-                            pred_mask = complete_prediction_pipeline(model, image, device, (512, 512))
-                            
-                            if pred_mask is not None:
-                                distribution = get_class_distribution(pred_mask)
+                            results = complete_prediction_pipeline_refined(
+                                model, image, device, select_classes, select_class_rgb_values, (512, 512)
+                            )
+
+                            if results:
+                                distribution = get_class_distribution_refined(
+                                    results['predicted_mask'], 
+                                    select_class_rgb_values, 
+                                    select_classes
+                                )
                                 
                                 results.append({
                                     'filename': file.name,
