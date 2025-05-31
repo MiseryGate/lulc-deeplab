@@ -1,3 +1,4 @@
+segmentation_models_pytorch
 opencv-python-headless
 tensorflow
 folium
