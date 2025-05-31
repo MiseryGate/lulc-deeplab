@@ -1,4 +1,3 @@
-from segmentation_models_pytorch.decoders.deeplabv3.model import DeepLabV3Plus
 import streamlit as st
 import torch
 import torch.nn.functional as F
@@ -45,11 +44,99 @@ COLOR_MAP = [
     [0, 0, 0]           # Unknown - Black
 ]
 
+def fix_encoder_compatibility(model, encoder_name):
+    """Fix encoder compatibility issues by setting missing attributes"""
+    try:
+        if hasattr(model, 'encoder'):
+            encoder = model.encoder
+            
+            # Fix _out_indexes attribute
+            if not hasattr(encoder, '_out_indexes'):
+                st.info("Setting missing _out_indexes attribute...")
+                
+                # Define _out_indexes for different encoders
+                encoder_configs = {
+                    'mobilenet_v2': [1, 2, 4, 6],
+                    'resnet18': [1, 2, 3, 4],
+                    'resnet34': [1, 2, 3, 4],
+                    'resnet50': [1, 2, 3, 4],
+                    'resnet101': [1, 2, 3, 4],
+                    'resnet152': [1, 2, 3, 4],
+                    'resnext50_32x4d': [1, 2, 3, 4],
+                    'resnext101_32x8d': [1, 2, 3, 4],
+                    'efficientnet-b0': [1, 2, 3, 4, 5],
+                    'efficientnet-b1': [1, 2, 3, 4, 5],
+                    'efficientnet-b2': [1, 2, 3, 4, 5],
+                    'efficientnet-b3': [1, 2, 3, 4, 5],
+                    'efficientnet-b4': [1, 2, 3, 4, 5],
+                    'efficientnet-b5': [1, 2, 3, 4, 5],
+                    'efficientnet-b6': [1, 2, 3, 4, 5],
+                    'efficientnet-b7': [1, 2, 3, 4, 5],
+                    'vgg11': [3, 8, 15, 22, 29],
+                    'vgg13': [5, 10, 17, 24, 31],
+                    'vgg16': [5, 10, 17, 24, 31],
+                    'vgg19': [5, 10, 17, 24, 31],
+                    'densenet121': [4, 5, 7, 9],
+                    'densenet169': [4, 5, 7, 9],
+                    'densenet201': [4, 5, 7, 9],
+                    'inceptionv3': [5, 6, 7, 8],
+                    'xception': [2, 3, 4, 5],
+                    'mit_b0': [2, 3, 4, 5],
+                    'mit_b1': [2, 3, 4, 5],
+                    'mit_b2': [2, 3, 4, 5],
+                    'mit_b3': [2, 3, 4, 5],
+                    'mit_b4': [2, 3, 4, 5],
+                    'mit_b5': [2, 3, 4, 5],
+                }
+                
+                # Set appropriate _out_indexes
+                if encoder_name in encoder_configs:
+                    encoder._out_indexes = encoder_configs[encoder_name]
+                else:
+                    # Default fallback
+                    encoder._out_indexes = [1, 2, 3, 4]
+                
+                st.success(f"Set _out_indexes to: {encoder._out_indexes}")
+            
+            # Fix _out_channels attribute if missing
+            if not hasattr(encoder, '_out_channels'):
+                st.info("Setting missing _out_channels attribute...")
+                
+                # Try to infer output channels by running a forward pass
+                encoder.eval()
+                with torch.no_grad():
+                    dummy_input = torch.randn(1, 3, 224, 224)
+                    try:
+                        features = encoder(dummy_input)
+                        if isinstance(features, (list, tuple)):
+                            out_channels = [f.shape[1] for f in features]
+                        else:
+                            out_channels = [features.shape[1]]
+                        encoder._out_channels = out_channels
+                        st.success(f"Inferred _out_channels: {out_channels}")
+                    except Exception as e:
+                        st.warning(f"Could not infer _out_channels: {e}")
+                        # Set default values based on encoder type
+                        if 'mobilenet' in encoder_name.lower():
+                            encoder._out_channels = [16, 24, 32, 1280]
+                        elif 'resnet' in encoder_name.lower():
+                            encoder._out_channels = [64, 256, 512, 1024, 2048]
+                        else:
+                            encoder._out_channels = [64, 128, 256, 512, 1024]
+            
+            return True
+    except Exception as e:
+        st.error(f"Error fixing encoder compatibility: {e}")
+        return False
+    
+    return False
+
 @st.cache_resource
 def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activation='softmax2d'):
-    """Load the trained DeepLab model with improved error handling"""
+    """Load the trained DeepLab model with improved error handling and compatibility fixes"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        st.info(f"Using device: {device}")
         
         # Import segmentation_models_pytorch
         try:
@@ -60,22 +147,69 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
             st.error("segmentation_models_pytorch not installed. Please install it: pip install segmentation-models-pytorch")
             return None, None
         
-        # Method 1: Try loading as state dict first (most reliable)
+        # Load checkpoint first to understand its structure
         try:
-            st.info("Attempting to load model as state dict...")
+            checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+        except Exception:
+            try:
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                st.warning("Loaded checkpoint with weights_only=False")
+            except Exception as e:
+                st.error(f"Failed to load checkpoint: {e}")
+                return None, None
+        
+        # Method 1: Try loading as complete model first
+        try:
+            st.info("Attempting to load complete model...")
             
-            # Create model architecture with error handling for version compatibility
+            if hasattr(checkpoint, 'eval'):
+                # checkpoint is the model itself
+                model = checkpoint
+                st.success("Loaded complete model object")
+            elif isinstance(checkpoint, dict) and 'model' in checkpoint:
+                if hasattr(checkpoint['model'], 'eval'):
+                    # checkpoint['model'] is the complete model
+                    model = checkpoint['model']
+                    st.success("Loaded model from 'model' key")
+                else:
+                    raise ValueError("'model' key doesn't contain a complete model")
+            else:
+                raise ValueError("Checkpoint is not a complete model")
+            
+            model = model.to(device)
+            model.eval()
+            
+            # Fix compatibility issues
+            fix_encoder_compatibility(model, encoder_name)
+            
+            # Test the model with a dummy input
+            try:
+                dummy_input = torch.randn(1, 3, 512, 512).to(device)
+                with torch.no_grad():
+                    test_output = model(dummy_input)
+                st.success("Model compatibility test passed!")
+                return model, device
+            except Exception as test_error:
+                st.warning(f"Model test failed with complete model: {test_error}")
+                # Fall through to state dict method
+                
+        except Exception as e1:
+            st.info(f"Complete model loading failed: {e1}")
+            st.info("Attempting to load as state dict...")
+        
+        # Method 2: Load as state dict (create new model and load weights)
+        try:
+            # Create model architecture
             try:
                 model = smp.DeepLabV3Plus(
                     encoder_name=encoder_name,
-                    encoder_weights="imagenet",  # Try with imagenet weights first
+                    encoder_weights="imagenet",
                     classes=num_classes,
                     activation=activation,
                 )
                 st.info("Created model with ImageNet encoder weights")
             except Exception as model_creation_error:
                 st.warning(f"Failed to create model with ImageNet weights: {model_creation_error}")
-                # Fallback to no pretrained weights
                 try:
                     model = smp.DeepLabV3Plus(
                         encoder_name=encoder_name,
@@ -88,88 +222,79 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
                     st.error(f"Failed to create model architecture: {fallback_error}")
                     return None, None
             
-            # Load the checkpoint
-            try:
-                checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-            except Exception:
-                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-                st.warning("Loaded checkpoint with weights_only=False")
-            
-            # Handle different checkpoint formats
+            # Load state dict
             if isinstance(checkpoint, dict):
                 if 'state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['state_dict'], strict=False)
-                    st.success("Loaded model from 'state_dict' key")
+                    state_dict = checkpoint['state_dict']
+                    st.info("Loading from 'state_dict' key")
                 elif 'model_state_dict' in checkpoint:
-                    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-                    st.success("Loaded model from 'model_state_dict' key")
-                elif 'model' in checkpoint:
-                    if isinstance(checkpoint['model'], dict):
-                        model.load_state_dict(checkpoint['model'], strict=False)
-                    else:
-                        # checkpoint['model'] is the actual model
-                        model = checkpoint['model']
-                    st.success("Loaded model from 'model' key")
+                    state_dict = checkpoint['model_state_dict']
+                    st.info("Loading from 'model_state_dict' key")
+                elif 'model' in checkpoint and isinstance(checkpoint['model'], dict):
+                    state_dict = checkpoint['model']
+                    st.info("Loading from 'model' key (state dict)")
                 else:
-                    # Try to load the dict directly
-                    model.load_state_dict(checkpoint, strict=False)
-                    st.success("Loaded model from checkpoint dict")
+                    # Assume the checkpoint dict is the state dict
+                    state_dict = checkpoint
+                    st.info("Using checkpoint as state dict")
             else:
-                # Checkpoint might be the model itself or state dict
-                if hasattr(checkpoint, 'state_dict'):
-                    # It's a model object
-                    model = checkpoint
-                    st.success("Loaded complete model object")
-                else:
-                    # It's likely a state dict
-                    model.load_state_dict(checkpoint, strict=False)
-                    st.success("Loaded model state dict directly")
-                
+                st.error("Checkpoint format not recognized")
+                return None, None
+            
+            # Load state dict with error handling
+            try:
+                model.load_state_dict(state_dict, strict=True)
+                st.success("Loaded state dict with strict=True")
+            except Exception as strict_error:
+                st.warning(f"Strict loading failed: {strict_error}")
+                try:
+                    model.load_state_dict(state_dict, strict=False)
+                    st.success("Loaded state dict with strict=False")
+                except Exception as non_strict_error:
+                    st.error(f"State dict loading failed: {non_strict_error}")
+                    return None, None
+            
             model = model.to(device)
             model.eval()
             
-            # Test the model with a dummy input to catch compatibility issues early
+            # Fix compatibility issues
+            fix_encoder_compatibility(model, encoder_name)
+            
+            # Test the model
             try:
                 dummy_input = torch.randn(1, 3, 512, 512).to(device)
                 with torch.no_grad():
                     test_output = model(dummy_input)
-                st.success("Model compatibility test passed!")
+                st.success("Model loaded and tested successfully!")
                 return model, device
             except Exception as test_error:
-                st.error(f"Model compatibility test failed: {test_error}")
-                # Try alternative loading method
-                return None, None
-            
-        except Exception as e1:
-            st.warning(f"Could not load as state dict: {str(e1)}")
-            
-            # Method 2: Try loading complete model (fallback)
-            try:
-                st.info("Attempting to load complete model...")
-                model = torch.load(model_path, map_location=device, weights_only=False)
+                st.error(f"Model test failed: {test_error}")
                 
-                if hasattr(model, 'eval'):
-                    model.eval()
-                    model = model.to(device)
-                    
-                    # Test compatibility
+                # Try one more compatibility fix
+                if "_out_indexes" in str(test_error):
+                    st.info("Attempting additional compatibility fixes...")
                     try:
-                        dummy_input = torch.randn(1, 3, 512, 512).to(device)
+                        # Force set attributes on all encoder modules
+                        for name, module in model.encoder.named_modules():
+                            if hasattr(module, 'forward'):
+                                if not hasattr(module, '_out_indexes'):
+                                    setattr(module, '_out_indexes', [1, 2, 3, 4])
+                                if not hasattr(module, '_out_channels'):
+                                    setattr(module, '_out_channels', [64, 128, 256, 512])
+                        
+                        # Test again
                         with torch.no_grad():
                             test_output = model(dummy_input)
-                        st.success("Complete model loaded and tested successfully!")
+                        st.success("Compatibility fix successful!")
                         return model, device
-                    except Exception as test_error:
-                        st.error(f"Complete model compatibility test failed: {test_error}")
-                        return None, None
-                else:
-                    st.error("Loaded object is not a valid model")
-                    return None, None
-                        
-            except Exception as e2:
-                st.error(f"All loading methods failed. Final error: {str(e2)}")
-                st.error("Please check your model file and ensure compatibility with your segmentation_models_pytorch version")
+                    except Exception as final_error:
+                        st.error(f"Final compatibility fix failed: {final_error}")
+                
                 return None, None
+                
+        except Exception as e2:
+            st.error(f"State dict loading failed: {e2}")
+            return None, None
         
     except Exception as e:
         st.error(f"General error loading model: {str(e)}")
@@ -253,49 +378,33 @@ def predict_with_model(model, image, device, target_size=(512, 512)):
         # Run prediction with enhanced error handling
         with torch.no_grad():
             try:
-                # First attempt - direct model call
+                # Direct model call
                 output = model(image_tensor)
                 st.success("Model prediction successful")
-            except AttributeError as attr_error:
-                if "_out_indexes" in str(attr_error):
-                    st.warning("Detected _out_indexes compatibility issue. Trying alternative approach...")
-                    
-                    # Try to fix the encoder compatibility issue
+            except Exception as prediction_error:
+                st.error(f"Prediction failed: {prediction_error}")
+                
+                # Try to fix common issues and retry
+                if "out_indexes" in str(prediction_error).lower():
+                    st.info("Attempting to fix _out_indexes issue...")
                     try:
-                        # Access the encoder and manually set _out_indexes if missing
-                        if hasattr(model, 'encoder') and not hasattr(model.encoder, '_out_indexes'):
-                            # Set default _out_indexes for common encoders
-                            if 'mobilenet' in encoder_name.lower():
-                                model.encoder._out_indexes = [1, 2, 4, 6]
-                            elif 'resnet' in encoder_name.lower():
-                                model.encoder._out_indexes = [0, 1, 2, 3, 4]
-                            elif 'efficientnet' in encoder_name.lower():
-                                model.encoder._out_indexes = [1, 2, 3, 4, 5]
-                            else:
-                                model.encoder._out_indexes = [0, 1, 2, 3, 4]  # Default
-                            
-                            st.info(f"Set _out_indexes to: {model.encoder._out_indexes}")
+                        # Force fix encoder attributes
+                        if hasattr(model, 'encoder'):
+                            if not hasattr(model.encoder, '_out_indexes'):
+                                model.encoder._out_indexes = [1, 2, 3, 4]
+                            if not hasattr(model.encoder, '_out_channels'):
+                                model.encoder._out_channels = [64, 128, 256, 512]
                         
-                        # Try prediction again
+                        # Retry prediction
                         output = model(image_tensor)
-                        st.success("Model prediction successful after compatibility fix")
+                        st.success("Prediction successful after fix!")
                         
-                    except Exception as fix_error:
-                        st.error(f"Failed to fix compatibility issue: {fix_error}")
-                        
-                        # Last resort - try to rebuild the model with correct version
-                        st.error("Please try updating segmentation_models_pytorch: pip install --upgrade segmentation-models-pytorch")
+                    except Exception as retry_error:
+                        st.error(f"Retry failed: {retry_error}")
                         return None, None
                 else:
-                    raise attr_error
-            
-            except RuntimeError as runtime_error:
-                if "size mismatch" in str(runtime_error).lower():
-                    st.error(f"Model input size mismatch: {runtime_error}")
-                    st.info("Try adjusting the target_size parameter or check your model architecture")
+                    st.error("Prediction failed with unrecognized error")
                     return None, None
-                else:
-                    raise runtime_error
             
             # Handle different output formats
             if isinstance(output, dict):
@@ -326,10 +435,6 @@ def predict_with_model(model, image, device, target_size=(512, 512)):
         
     except Exception as e:
         st.error(f"Error during prediction: {str(e)}")
-        st.error("Please check:")
-        st.error("1. Model compatibility with your segmentation_models_pytorch version")
-        st.error("2. Input image format and size")
-        st.error("3. Model architecture parameters (encoder, classes, activation)")
         return None, None
 
 def resize_prediction_to_original(prediction, original_size, target_size):
@@ -485,47 +590,60 @@ num_classes = st.sidebar.number_input(
 uploaded_model = st.sidebar.file_uploader(
     "Upload your trained DeepLab model (.pth)", 
     type=['pth'],
-    help="Upload your trained DeepLab model file (preferably saved as state_dict)"
+    help="Upload your trained DeepLab model file"
 )
 
-# Add important note about model saving and compatibility
-st.sidebar.info("""
-**Important:** For best compatibility:
-
-1. **Model Saving:**
-```python
-torch.save(model.state_dict(), 'model.pth')
-```
-
-2. **Version Compatibility:**
-- Update segmentation_models_pytorch:
-```bash
-pip install --upgrade segmentation-models-pytorch
-```
-
-3. **If you get '_out_indexes' error:**
-- The app will try to fix it automatically
-- Or update your library version
-""")
-
-# Add version compatibility section
-st.sidebar.subheader("Version Info")
-if st.sidebar.button("Check Library Versions"):
-    try:
-        import segmentation_models_pytorch as smp
-        smp_version = smp.__version__ if hasattr(smp, '__version__') else "unknown"
-        st.sidebar.success(f"SMP Version: {smp_version}")
-    except ImportError:
-        st.sidebar.error("SMP not installed")
+# Enhanced troubleshooting section
+st.sidebar.subheader("🔧 Troubleshooting")
+with st.sidebar.expander("Common Issues & Solutions"):
+    st.markdown("""
+    **1. '_out_indexes' Error:**
+    - The app will auto-fix this
+    - Update: `pip install --upgrade segmentation-models-pytorch`
     
-    import torch
-    st.sidebar.info(f"PyTorch: {torch.__version__}")
+    **2. Model Loading Issues:**
+    - Try different loading methods in the app
+    - Ensure model architecture matches
+    
+    **3. Recommended Model Saving:**
+    ```python
+    # Best practice
+    torch.save(model.state_dict(), 'model.pth')
+    
+    # Alternative (may work better sometimes)
+    torch.save(model, 'model.pth')
+    ```
+    
+    **4. Version Compatibility:**
+    - Check versions below
+    - Try older SMP version if needed:
+    ```bash
+    pip install segmentation-models-pytorch==0.3.0
+    ```
+    """)
+
+# Version info
+st.sidebar.subheader("📋 System Info")
+if st.sidebar.button("Check Versions"):
+    col1, col2 = st.sidebar.columns(2)
+    
+    with col1:
+        try:
+            import segmentation_models_pytorch as smp
+            smp_version = getattr(smp, '__version__', "unknown")
+            st.success(f"SMP: {smp_version}")
+        except ImportError:
+            st.error("SMP: Not installed")
+    
+    with col2:
+        import torch
+        st.info(f"PyTorch: {torch.__version__}")
     
     try:
         import cv2
         st.sidebar.info(f"OpenCV: {cv2.__version__}")
     except ImportError:
-        st.sidebar.warning("OpenCV not available")
+        st.sidebar.warning("OpenCV: Not available")
 
 if uploaded_model is not None:
     # Save uploaded model temporarily
@@ -534,13 +652,13 @@ if uploaded_model is not None:
         f.write(uploaded_model.getbuffer())
     
     # Load model with architecture parameters
-    with st.spinner("Loading model..."):
+    with st.spinner("Loading model... This may take a moment."):
         model, device = load_model(model_path, encoder_name, num_classes, activation)
     
     if model is not None:
         st.sidebar.success("✅ Model loaded successfully!")
         st.sidebar.info(f"Device: {device}")
-        st.sidebar.info(f"Architecture: DeepLabV3Plus with {encoder_name}")
+        st.sidebar.info(f"Architecture: DeepLabV3Plus + {encoder_name}")
         
         # Clean up temporary file
         try:
