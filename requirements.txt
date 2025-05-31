@@ -1,4 +1,4 @@
-segmentation_models_pytorch
+segmentation-models-pytorch==0.3.0
 opencv-python-headless
 tensorflow
 folium
