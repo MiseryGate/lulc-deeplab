@@ -45,37 +45,36 @@ COLOR_MAP = [
 ]
 
 @st.cache_resource
-def load_model(model_path, encoder_name="resnet34", num_classes=7):
+def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activation='softmax2d'):
     """Load the trained DeepLab model"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Try different loading methods
+        # Try loading the complete model first (as you saved it with torch.save(model, 'best_model.pth'))
         try:
-            # Method 1: Load complete model
             model = torch.load(model_path, map_location=device)
             if hasattr(model, 'eval'):
                 model.eval()
                 return model, device
-            else:
-                # If it's just state dict, continue to method 2
-                checkpoint = model
         except Exception as e1:
-            # Method 2: Load as state dict
-            checkpoint = torch.load(model_path, map_location=device)
+            st.warning(f"Could not load complete model: {str(e1)}")
         
-        # Create model architecture
+        # If complete model loading fails, try loading as state dict
         try:
             import segmentation_models_pytorch as smp
             
+            # Create model architecture matching your training setup
             model = smp.DeepLabV3Plus(
                 encoder_name=encoder_name,
-                encoder_weights=None,  # Don't load pretrained weights
-                in_channels=3,
+                encoder_weights=None,  # Don't load ImageNet weights when loading trained model
                 classes=num_classes,
+                activation=activation,
             )
             
-            # Load state dict
+            # Load checkpoint
+            checkpoint = torch.load(model_path, map_location=device)
+            
+            # Handle different checkpoint formats
             if isinstance(checkpoint, dict):
                 if 'state_dict' in checkpoint:
                     model.load_state_dict(checkpoint['state_dict'])
@@ -84,11 +83,10 @@ def load_model(model_path, encoder_name="resnet34", num_classes=7):
                 elif 'model' in checkpoint:
                     model.load_state_dict(checkpoint['model'])
                 else:
-                    # Try loading the checkpoint directly
                     model.load_state_dict(checkpoint)
             else:
-                st.error("Unexpected checkpoint format")
-                return None, None
+                # Checkpoint is likely the state dict itself
+                model.load_state_dict(checkpoint)
                 
             model = model.to(device)
             model.eval()
@@ -98,30 +96,48 @@ def load_model(model_path, encoder_name="resnet34", num_classes=7):
             st.error("segmentation_models_pytorch not installed. Please install it: pip install segmentation-models-pytorch")
             return None, None
         except Exception as e2:
-            st.error(f"Error creating model architecture: {str(e2)}")
-            st.info("Please ensure your model architecture settings match your trained model.")
+            st.error(f"Error loading model: {str(e2)}")
             return None, None
         
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
+        st.error(f"General error loading model: {str(e)}")
         return None, None
 
-def preprocess_image(image, target_size=(512, 512)):
-    """Preprocess image for model prediction"""
+def preprocess_image(image, encoder_name='mobilenet_v2', encoder_weights='imagenet', target_size=(512, 512)):
+    """Preprocess image for model prediction using SMP preprocessing"""
     if isinstance(image, np.ndarray):
         image = Image.fromarray(image)
     
     # Resize image
     image = image.resize(target_size, Image.BILINEAR)
+    image_np = np.array(image)
     
-    # Convert to tensor and normalize
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                           std=[0.229, 0.224, 0.225])
-    ])
-    
-    return transform(image).unsqueeze(0)
+    # Get SMP preprocessing function
+    try:
+        import segmentation_models_pytorch as smp
+        preprocessing_fn = smp.encoders.get_preprocessing_fn(encoder_name, encoder_weights)
+        
+        # Apply preprocessing
+        preprocessed = preprocessing_fn(image_np)
+        
+        # Convert to tensor
+        image_tensor = torch.from_numpy(preprocessed).float()
+        
+        # Add batch dimension
+        if len(image_tensor.shape) == 3:
+            image_tensor = image_tensor.unsqueeze(0)
+            
+        return image_tensor
+        
+    except ImportError:
+        st.warning("Using standard preprocessing as SMP is not available")
+        # Fallback to standard preprocessing
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+        return transform(image).unsqueeze(0)
 
 def predict_image(model, image_tensor, device):
     """Make prediction using the loaded model"""
@@ -129,7 +145,7 @@ def predict_image(model, image_tensor, device):
         with torch.no_grad():
             image_tensor = image_tensor.to(device)
             
-            # Handle different model output formats
+            # Forward pass
             outputs = model(image_tensor)
             
             # Handle different output formats
@@ -139,7 +155,6 @@ def predict_image(model, image_tensor, device):
                 elif 'logits' in outputs:
                     outputs = outputs['logits']
                 else:
-                    # Take the first value if it's a dict
                     outputs = list(outputs.values())[0]
             elif isinstance(outputs, (list, tuple)):
                 outputs = outputs[0]
@@ -148,11 +163,11 @@ def predict_image(model, image_tensor, device):
             if len(outputs.shape) == 3:
                 outputs = outputs.unsqueeze(0)
             
-            # Apply softmax and get predictions
-            probs = F.softmax(outputs, dim=1)
-            predictions = torch.argmax(probs, dim=1)
+            # Since your model uses softmax2d activation, outputs are already probabilities
+            # Just get the class predictions
+            predictions = torch.argmax(outputs, dim=1)
             
-            return predictions.cpu().numpy(), probs.cpu().numpy()
+            return predictions.cpu().numpy(), outputs.cpu().numpy()
             
     except Exception as e:
         st.error(f"Error during prediction: {str(e)}")
@@ -251,14 +266,22 @@ st.sidebar.header("Model Configuration")
 st.sidebar.subheader("Model Architecture")
 encoder_name = st.sidebar.selectbox(
     "Encoder", 
-    ["resnet34", "resnet50", "resnet101", "mobilenet_v2", "efficientnet-b0", "efficientnet-b3"],
+    ["mobilenet_v2", "resnet34", "resnet50", "resnet101", "efficientnet-b0", "efficientnet-b3"],
+    index=0,  # Default to mobilenet_v2
     help="Select the encoder used in your model"
+)
+
+activation = st.sidebar.selectbox(
+    "Activation",
+    ["softmax2d", "sigmoid", None],
+    index=0,  # Default to softmax2d
+    help="Activation function used in your model"
 )
 
 num_classes = st.sidebar.number_input(
     "Number of Classes", 
     min_value=1, max_value=20, value=7,
-    help="Number of output classes in your model"
+    help="Number of output classes in your model (len(select_classes))"
 )
 
 # Model upload
@@ -279,8 +302,9 @@ if uploaded_model is not None:
         # Store architecture info in session state for model loading
         st.session_state.encoder_name = encoder_name
         st.session_state.num_classes = num_classes
+        st.session_state.activation = activation
         
-        model, device = load_model(model_path, encoder_name, num_classes)
+        model, device = load_model(model_path, encoder_name, num_classes, activation)
     
     if model is not None:
         st.sidebar.success("✅ Model loaded successfully!")
@@ -317,7 +341,7 @@ if uploaded_model is not None:
                 
                 # Preprocess and predict
                 with st.spinner("Processing image..."):
-                    image_tensor = preprocess_image(image)
+                    image_tensor = preprocess_image(image, encoder_name, 'imagenet')
                     result = predict_image(model, image_tensor, device)
                     
                     if result[0] is not None:
@@ -447,16 +471,18 @@ if uploaded_model is not None:
                     
                     for i, file in enumerate(uploaded_files):
                         image = Image.open(file).convert('RGB')
-                        image_tensor = preprocess_image(image)
-                        predictions, _ = predict_image(model, image_tensor, device)
+                        image_tensor = preprocess_image(image, encoder_name, 'imagenet')
+                        result = predict_image(model, image_tensor, device)
                         
-                        pred_mask = predictions[0]
-                        distribution = get_class_distribution(pred_mask)
-                        
-                        results.append({
-                            'filename': file.name,
-                            **distribution
-                        })
+                        if result[0] is not None:
+                            predictions, _ = result
+                            pred_mask = predictions[0]
+                            distribution = get_class_distribution(pred_mask)
+                            
+                            results.append({
+                                'filename': file.name,
+                                **distribution
+                            })
                         
                         progress_bar.progress((i + 1) / len(uploaded_files))
                     
