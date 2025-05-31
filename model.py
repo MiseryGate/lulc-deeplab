@@ -896,7 +896,39 @@ if uploaded_model is not None:
                 fig, ax = plt.subplots(figsize=(10, 6))
                 classes = list(distribution.keys())
                 percentages = list(distribution.values())
-                colors = [np.array(COLOR_MAP[CLASS_NAMES.index(cls)])/255.0 for cls in classes]
+
+                # Fix the color mapping issue
+                def get_color_for_class(cls, default_color=[128, 128, 128]):
+                    """Get color for class name, handling case mismatches and missing classes"""
+                    # Convert class name to match CLASS_NAMES format
+                    cls_formatted = cls.lower().replace(' ', '_')
+                    
+                    # Create a mapping from formatted names to indices
+                    class_name_mapping = {
+                        'urban_land': 'Urban land',
+                        'agriculture_land': 'Agriculture land',
+                        'rangeland': 'Rangeland', 
+                        'forest_land': 'Forest land',
+                        'water': 'Water',
+                        'barren_land': 'Barren land',
+                        'unknown': 'Unknown'
+                    }
+                    
+                    # Try to find the class in CLASS_NAMES
+                    if cls_formatted in class_name_mapping:
+                        mapped_name = class_name_mapping[cls_formatted]
+                        if mapped_name in CLASS_NAMES:
+                            return np.array(COLOR_MAP[CLASS_NAMES.index(mapped_name)]) / 255.0
+                    
+                    # Direct lookup attempt
+                    if cls in CLASS_NAMES:
+                        return np.array(COLOR_MAP[CLASS_NAMES.index(cls)]) / 255.0
+                    
+                    # Default color if not found
+                    print(f"Warning: Class '{cls}' not found in CLASS_NAMES, using default color")
+                    return np.array(default_color) / 255.0
+
+                colors = [get_color_for_class(cls) for cls in classes]
                 
                 bars = ax.bar(classes, percentages, color=colors)
                 ax.set_ylabel('Percentage (%)')
@@ -913,15 +945,32 @@ if uploaded_model is not None:
                 
                 # Legend
                 st.subheader("Legend")
-                legend_cols = st.columns(len(CLASS_NAMES))
-                for i, (col, class_name) in enumerate(zip(legend_cols, CLASS_NAMES)):
-                    color_rgb = COLOR_MAP[i]
-                    col.markdown(
-                        f'<div style="background-color: rgb({color_rgb[0]}, {color_rgb[1]}, {color_rgb[2]}); '
-                        f'padding: 10px; text-align: center; border-radius: 5px; margin: 2px;">'
-                        f'<strong>{class_name}</strong></div>',
-                        unsafe_allow_html=True
-                    )
+                predicted_classes = list(distribution.keys())
+                if predicted_classes:
+                    legend_cols = st.columns(len(predicted_classes))
+                    
+                    for i, (col, class_name) in enumerate(zip(legend_cols, predicted_classes)):
+                        # Get color using the safe function
+                        color_normalized = get_color_for_class(class_name)
+                        color_rgb = (color_normalized * 255).astype(int)
+                        
+                        col.markdown(
+                            f'<div style="background-color: rgb({color_rgb[0]}, {color_rgb[1]}, {color_rgb[2]}); '
+                            f'padding: 10px; text-align: center; border-radius: 5px; margin: 2px; color: white; text-shadow: 1px 1px 1px black;">'
+                            f'<strong>{class_name}</strong></div>',
+                            unsafe_allow_html=True
+                        )
+                else:
+                    # Fallback: show all available classes
+                    legend_cols = st.columns(len(CLASS_NAMES))
+                    for i, (col, class_name) in enumerate(zip(legend_cols, CLASS_NAMES)):
+                        color_rgb = COLOR_MAP[i]
+                        col.markdown(
+                            f'<div style="background-color: rgb({color_rgb[0]}, {color_rgb[1]}, {color_rgb[2]}); '
+                            f'padding: 10px; text-align: center; border-radius: 5px; margin: 2px; color: white; text-shadow: 1px 1px 1px black;">'
+                            f'<strong>{class_name}</strong></div>',
+                            unsafe_allow_html=True
+                        )
         
         with tab2:
             st.header("Download Satellite Data for Borneo")
