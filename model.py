@@ -131,6 +131,11 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
         st.error(f"General error loading model: {str(e)}")
         return None, None
 
+import cv2
+import numpy as np
+import torch
+from PIL import Image
+
 def preprocess_image(image, target_size=(512, 512)):
     """
     Preprocess image for DeepLabV3Plus model
@@ -187,6 +192,105 @@ def preprocess_image(image, target_size=(512, 512)):
     print(f"Target size: {target_size}")
     
     return image_tensor, original_size
+
+def predict_with_model(model, image, device, target_size=(512, 512)):
+    """
+    Run prediction on preprocessed image
+    
+    Args:
+        model: trained DeepLabV3Plus model
+        image: input image (PIL, numpy array, or path)
+        device: torch device
+        target_size: target size for model input
+    
+    Returns:
+        prediction: numpy array of predicted segmentation mask
+        original_size: original image dimensions
+    """
+    try:
+        # Preprocess image
+        image_tensor, original_size = preprocess_image(image, target_size)
+        image_tensor = image_tensor.to(device)
+        
+        # Run prediction
+        with torch.no_grad():
+            output = model(image_tensor)
+            
+            # Handle different output formats
+            if isinstance(output, dict):
+                output = output['out']  # Some models return dict
+            
+            # Get predicted class for each pixel
+            prediction = torch.argmax(output, dim=1)  # Shape: (1, H, W)
+            prediction = prediction.squeeze(0).cpu().numpy()  # Remove batch dim and move to CPU
+        
+        return prediction, original_size
+        
+    except Exception as e:
+        print(f"Error during prediction: {str(e)}")
+        return None, None
+
+def resize_prediction_to_original(prediction, original_size, target_size):
+    """
+    Resize prediction back to original image size
+    
+    Args:
+        prediction: numpy array of predicted mask
+        original_size: tuple (height, width) of original image
+        target_size: tuple (height, width) of model input size
+    
+    Returns:
+        resized_prediction: prediction resized to original dimensions
+    """
+    if prediction is None:
+        return None
+        
+    # Resize prediction back to original size
+    prediction_resized = cv2.resize(
+        prediction.astype(np.uint8), 
+        (original_size[1], original_size[0]),  # cv2.resize expects (width, height)
+        interpolation=cv2.INTER_NEAREST  # Use nearest neighbor for class labels
+    )
+    
+    return prediction_resized
+
+# Example usage function
+def complete_prediction_pipeline(model, image, device, target_size=(512, 512)):
+    """
+    Complete pipeline: preprocess -> predict -> resize back to original
+    """
+    # Run prediction
+    prediction, original_size = predict_with_model(model, image, device, target_size)
+    
+    if prediction is None:
+        return None
+    
+    # Resize back to original size
+    final_prediction = resize_prediction_to_original(prediction, original_size, target_size)
+    
+    return final_prediction
+
+# Debug function to check image dimensions
+def debug_image_shape(image):
+    """Debug function to check image shapes at each step"""
+    print("=== Image Shape Debug ===")
+    
+    if isinstance(image, str):
+        img = Image.open(image)
+        print(f"Original file size: {img.size}")  # (width, height)
+        img_array = np.array(img)
+    elif isinstance(image, np.ndarray):
+        img_array = image
+        print(f"Input numpy array shape: {img_array.shape}")
+    else:
+        img_array = np.array(image)
+        print(f"Input PIL image size: {image.size}")
+    
+    print(f"Array shape: {img_array.shape}")
+    print(f"Array dtype: {img_array.dtype}")
+    print(f"Array min/max: {img_array.min()}/{img_array.max()}")
+    
+    return img_array
 
 
 def predict_image(model, image_tensor, device):
@@ -391,19 +495,31 @@ if uploaded_model is not None:
                 
                 # Preprocess and predict
                 with st.spinner("Processing image..."):
-                    image_tensor = preprocess_image(image, encoder_name, 'imagenet')
-                    result = predict_image(model, image_tensor, device)
-                    
-                    if result[0] is not None:
-                        predictions, probabilities = result
+                    try:
+                        # Use the fixed preprocessing function
+                        # target_size should be divisible by 16
+                        target_size = (512, 512)  # or (416, 416), (608, 608), etc.
                         
-                        # Get prediction mask
-                        pred_mask = predictions[0]
+                        # Option 1: Use the complete pipeline (recommended)
+                        pred_mask = complete_prediction_pipeline(model, image, device, target_size)
                         
-                        # Colorize prediction
-                        colored_pred = colorize_prediction(pred_mask, COLOR_MAP)
-                    else:
-                        st.error("Failed to make prediction. Please check your model and try again.")
+                        if pred_mask is not None:
+                            # Colorize prediction
+                            colored_pred = colorize_prediction(pred_mask, COLOR_MAP)
+                            
+                            with col2:
+                                st.subheader("Segmentation Result")
+                                st.image(colored_pred, use_column_width=True)
+                                
+                        else:
+                            st.error("Failed to make prediction. Please check your model and try again.")
+                            st.stop()
+                            
+                    except Exception as e:
+                        st.error(f"Error during prediction: {str(e)}")
+                        # Debug information
+                        st.write("Debug info:")
+                        debug_image_shape(image)
                         st.stop()
                 
                 with col2:
