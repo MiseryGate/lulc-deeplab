@@ -1,3 +1,4 @@
+from segmentation_models_pytorch.decoders.deeplabv3.model import DeepLabV3Plus
 import streamlit as st
 import torch
 import torch.nn.functional as F
@@ -13,7 +14,6 @@ from io import BytesIO
 import cv2
 from datetime import datetime, timedelta
 import os
-from segmentation_models_pytorch.decoders.deeplabv3.model import DeepLabV3Plus
 
 # Set page config
 st.set_page_config(
@@ -45,32 +45,67 @@ COLOR_MAP = [
 ]
 
 @st.cache_resource
-# def load_model(model_path):
-#     """Load the trained DeepLab model"""
-#     try:
-#         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#         model = torch.load(model_path, map_location=device)
-#         model.eval()
-#         return model, device
-#     except Exception as e:
-#         st.error(f"Error loading model: {str(e)}")
-#         return None, None
-def load_model(model_path):
-    """Load the trained DeepLab model safely with PyTorch 2.6+"""
+def load_model(model_path, encoder_name="resnet34", num_classes=7):
+    """Load the trained DeepLab model"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        # Add DeepLabV3Plus to the allowlist for safe deserialization
-        torch.serialization.add_safe_globals([DeepLabV3Plus])
-
-        # Load the full model, assuming it was saved with torch.save(model)
-        model = torch.load(model_path, map_location=device, weights_only=False)
-        model.eval()
-        return model, device
-
+        
+        # Try different loading methods
+        try:
+            # Method 1: Load complete model
+            model = torch.load(model_path, map_location=device)
+            if hasattr(model, 'eval'):
+                model.eval()
+                return model, device
+            else:
+                # If it's just state dict, continue to method 2
+                checkpoint = model
+        except Exception as e1:
+            # Method 2: Load as state dict
+            checkpoint = torch.load(model_path, map_location=device)
+        
+        # Create model architecture
+        try:
+            import segmentation_models_pytorch as smp
+            
+            model = smp.DeepLabV3Plus(
+                encoder_name=encoder_name,
+                encoder_weights=None,  # Don't load pretrained weights
+                in_channels=3,
+                classes=num_classes,
+            )
+            
+            # Load state dict
+            if isinstance(checkpoint, dict):
+                if 'state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['state_dict'])
+                elif 'model_state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                elif 'model' in checkpoint:
+                    model.load_state_dict(checkpoint['model'])
+                else:
+                    # Try loading the checkpoint directly
+                    model.load_state_dict(checkpoint)
+            else:
+                st.error("Unexpected checkpoint format")
+                return None, None
+                
+            model = model.to(device)
+            model.eval()
+            return model, device
+            
+        except ImportError:
+            st.error("segmentation_models_pytorch not installed. Please install it: pip install segmentation-models-pytorch")
+            return None, None
+        except Exception as e2:
+            st.error(f"Error creating model architecture: {str(e2)}")
+            st.info("Please ensure your model architecture settings match your trained model.")
+            return None, None
+        
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None, None
+
 def preprocess_image(image, target_size=(512, 512)):
     """Preprocess image for model prediction"""
     if isinstance(image, np.ndarray):
@@ -90,18 +125,39 @@ def preprocess_image(image, target_size=(512, 512)):
 
 def predict_image(model, image_tensor, device):
     """Make prediction using the loaded model"""
-    with torch.no_grad():
-        image_tensor = image_tensor.to(device)
-        outputs = model(image_tensor)
-        
-        if isinstance(outputs, dict):
-            outputs = outputs['out']
-        
-        # Apply softmax and get predictions
-        probs = F.softmax(outputs, dim=1)
-        predictions = torch.argmax(probs, dim=1)
-        
-        return predictions.cpu().numpy(), probs.cpu().numpy()
+    try:
+        with torch.no_grad():
+            image_tensor = image_tensor.to(device)
+            
+            # Handle different model output formats
+            outputs = model(image_tensor)
+            
+            # Handle different output formats
+            if isinstance(outputs, dict):
+                if 'out' in outputs:
+                    outputs = outputs['out']
+                elif 'logits' in outputs:
+                    outputs = outputs['logits']
+                else:
+                    # Take the first value if it's a dict
+                    outputs = list(outputs.values())[0]
+            elif isinstance(outputs, (list, tuple)):
+                outputs = outputs[0]
+            
+            # Ensure outputs have the right shape
+            if len(outputs.shape) == 3:
+                outputs = outputs.unsqueeze(0)
+            
+            # Apply softmax and get predictions
+            probs = F.softmax(outputs, dim=1)
+            predictions = torch.argmax(probs, dim=1)
+            
+            return predictions.cpu().numpy(), probs.cpu().numpy()
+            
+    except Exception as e:
+        st.error(f"Error during prediction: {str(e)}")
+        st.info("Please check if your model architecture matches the expected input format.")
+        return None, None
 
 def colorize_prediction(prediction, color_map):
     """Convert prediction mask to colored image"""
@@ -191,6 +247,20 @@ st.markdown("Analyze land cover patterns in Borneo, Indonesia using your trained
 # Sidebar for model loading and settings
 st.sidebar.header("Model Configuration")
 
+# Model architecture selection
+st.sidebar.subheader("Model Architecture")
+encoder_name = st.sidebar.selectbox(
+    "Encoder", 
+    ["resnet34", "resnet50", "resnet101", "mobilenet_v2", "efficientnet-b0", "efficientnet-b3"],
+    help="Select the encoder used in your model"
+)
+
+num_classes = st.sidebar.number_input(
+    "Number of Classes", 
+    min_value=1, max_value=20, value=7,
+    help="Number of output classes in your model"
+)
+
 # Model upload
 uploaded_model = st.sidebar.file_uploader(
     "Upload your trained DeepLab model (.pth)", 
@@ -204,12 +274,18 @@ if uploaded_model is not None:
     with open(model_path, "wb") as f:
         f.write(uploaded_model.getbuffer())
     
-    # Load model
-    model, device = load_model(model_path)
+    # Load model with architecture parameters
+    with st.spinner("Loading model..."):
+        # Store architecture info in session state for model loading
+        st.session_state.encoder_name = encoder_name
+        st.session_state.num_classes = num_classes
+        
+        model, device = load_model(model_path, encoder_name, num_classes)
     
     if model is not None:
         st.sidebar.success("✅ Model loaded successfully!")
         st.sidebar.info(f"Device: {device}")
+        st.sidebar.info(f"Architecture: DeepLabV3Plus with {encoder_name}")
         
         # Clean up temporary file
         try:
@@ -242,13 +318,19 @@ if uploaded_model is not None:
                 # Preprocess and predict
                 with st.spinner("Processing image..."):
                     image_tensor = preprocess_image(image)
-                    predictions, probabilities = predict_image(model, image_tensor, device)
+                    result = predict_image(model, image_tensor, device)
                     
-                    # Get prediction mask
-                    pred_mask = predictions[0]
-                    
-                    # Colorize prediction
-                    colored_pred = colorize_prediction(pred_mask, COLOR_MAP)
+                    if result[0] is not None:
+                        predictions, probabilities = result
+                        
+                        # Get prediction mask
+                        pred_mask = predictions[0]
+                        
+                        # Colorize prediction
+                        colored_pred = colorize_prediction(pred_mask, COLOR_MAP)
+                    else:
+                        st.error("Failed to make prediction. Please check your model and try again.")
+                        st.stop()
                 
                 with col2:
                     st.subheader("Land Cover Prediction")
