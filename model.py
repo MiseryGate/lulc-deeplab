@@ -14,6 +14,7 @@ from io import BytesIO
 import cv2
 from datetime import datetime, timedelta
 import os
+import pandas as pd
 
 # Set page config
 st.set_page_config(
@@ -46,47 +47,22 @@ COLOR_MAP = [
 
 @st.cache_resource
 def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activation='softmax2d'):
-    """Load the trained DeepLab model"""
+    """Load the trained DeepLab model with improved error handling"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Try loading the complete model first (as you saved it with torch.save(model, 'best_model.pth'))
+        # Import segmentation_models_pytorch
         try:
-            # Import segmentation_models_pytorch to make classes available
             import segmentation_models_pytorch as smp
-            
-            # Add safe globals for the specific classes you need
-            torch.serialization.add_safe_globals([
-                smp.encoders.mobilenet.MobileNetV2Encoder,
-                smp.DeepLabV3Plus,
-                # Add other classes if needed based on your model architecture
-            ])
-            
-            # Load with weights_only=True (default in PyTorch 2.6+)
-            model = torch.load(model_path, map_location=device)
-            
-            if hasattr(model, 'eval'):
-                model.eval()
-                return model, device
-                
-        except Exception as e1:
-            st.warning(f"Could not load complete model with safe globals: {str(e1)}")
-            
-            # Fallback: try with weights_only=False (only if you trust the source)
-            try:
-                model = torch.load(model_path, map_location=device, weights_only=False)
-                if hasattr(model, 'eval'):
-                    model.eval()
-                    st.warning("Loaded model with weights_only=False. Ensure you trust the model source.")
-                    return model, device
-            except Exception as e2:
-                st.warning(f"Could not load complete model with weights_only=False: {str(e2)}")
+        except ImportError:
+            st.error("segmentation_models_pytorch not installed. Please install it: pip install segmentation-models-pytorch")
+            return None, None
         
-        # If complete model loading fails, try loading as state dict
+        # Method 1: Try loading as state dict first (most reliable)
         try:
-            import segmentation_models_pytorch as smp
+            st.info("Attempting to load model as state dict...")
             
-            # Create model architecture matching your training setup
+            # Create model architecture
             model = smp.DeepLabV3Plus(
                 encoder_name=encoder_name,
                 encoder_weights=None,  # Don't load ImageNet weights when loading trained model
@@ -94,47 +70,92 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
                 activation=activation,
             )
             
-            # Load checkpoint with weights_only=True (safer for state dicts)
-            try:
-                checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-            except Exception:
-                # Fallback to weights_only=False if needed
-                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-                st.warning("Loaded checkpoint with weights_only=False. Ensure you trust the model source.")
+            # Load the checkpoint
+            checkpoint = torch.load(model_path, map_location=device, weights_only=True)
             
             # Handle different checkpoint formats
             if isinstance(checkpoint, dict):
                 if 'state_dict' in checkpoint:
                     model.load_state_dict(checkpoint['state_dict'])
+                    st.success("Loaded model from 'state_dict' key")
                 elif 'model_state_dict' in checkpoint:
                     model.load_state_dict(checkpoint['model_state_dict'])
+                    st.success("Loaded model from 'model_state_dict' key")
                 elif 'model' in checkpoint:
                     model.load_state_dict(checkpoint['model'])
+                    st.success("Loaded model from 'model' key")
                 else:
+                    # Try to load the dict directly
                     model.load_state_dict(checkpoint)
+                    st.success("Loaded model from checkpoint dict")
             else:
                 # Checkpoint is likely the state dict itself
                 model.load_state_dict(checkpoint)
+                st.success("Loaded model state dict directly")
                 
             model = model.to(device)
             model.eval()
             return model, device
             
-        except ImportError:
-            st.error("segmentation_models_pytorch not installed. Please install it: pip install segmentation-models-pytorch")
-            return None, None
-        except Exception as e2:
-            st.error(f"Error loading model: {str(e2)}")
-            return None, None
+        except Exception as e1:
+            st.warning(f"Could not load as state dict: {str(e1)}")
+            
+            # Method 2: Try with weights_only=False (fallback)
+            try:
+                st.info("Attempting to load with weights_only=False...")
+                checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                
+                # Create model architecture
+                model = smp.DeepLabV3Plus(
+                    encoder_name=encoder_name,
+                    encoder_weights=None,
+                    classes=num_classes,
+                    activation=activation,
+                )
+                
+                # Handle different checkpoint formats
+                if isinstance(checkpoint, dict):
+                    if 'state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['state_dict'])
+                    elif 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                    elif 'model' in checkpoint:
+                        model.load_state_dict(checkpoint['model'])
+                    else:
+                        model.load_state_dict(checkpoint)
+                else:
+                    model.load_state_dict(checkpoint)
+                
+                model = model.to(device)
+                model.eval()
+                st.warning("Loaded with weights_only=False. Ensure you trust the model source.")
+                return model, device
+                
+            except Exception as e2:
+                st.error(f"Could not load model with fallback method: {str(e2)}")
+                
+                # Method 3: Try loading as complete model (last resort)
+                try:
+                    st.info("Attempting to load complete model...")
+                    # This is risky and may cause the RuntimeError you're seeing
+                    model = torch.load(model_path, map_location=device, weights_only=False)
+                    
+                    if hasattr(model, 'eval'):
+                        model.eval()
+                        st.warning("Loaded complete model. This method is deprecated and may cause issues.")
+                        return model, device
+                    else:
+                        st.error("Loaded object is not a valid model")
+                        return None, None
+                        
+                except Exception as e3:
+                    st.error(f"All loading methods failed. Final error: {str(e3)}")
+                    st.error("Please ensure your model was saved as a state dict using: torch.save(model.state_dict(), 'model.pth')")
+                    return None, None
         
     except Exception as e:
         st.error(f"General error loading model: {str(e)}")
         return None, None
-
-import cv2
-import numpy as np
-import torch
-from PIL import Image
 
 def preprocess_image(image, target_size=(512, 512)):
     """
@@ -188,9 +209,6 @@ def preprocess_image(image, target_size=(512, 512)):
     image_tensor = image_tensor.permute(2, 0, 1)  # HWC to CHW
     image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension
     
-    print(f"Preprocessed image shape: {image_tensor.shape}")
-    print(f"Target size: {target_size}")
-    
     return image_tensor, original_size
 
 def predict_with_model(model, image, device, target_size=(512, 512)):
@@ -219,6 +237,8 @@ def predict_with_model(model, image, device, target_size=(512, 512)):
             # Handle different output formats
             if isinstance(output, dict):
                 output = output['out']  # Some models return dict
+            elif isinstance(output, (list, tuple)):
+                output = output[0]
             
             # Get predicted class for each pixel
             prediction = torch.argmax(output, dim=1)  # Shape: (1, H, W)
@@ -227,7 +247,7 @@ def predict_with_model(model, image, device, target_size=(512, 512)):
         return prediction, original_size
         
     except Exception as e:
-        print(f"Error during prediction: {str(e)}")
+        st.error(f"Error during prediction: {str(e)}")
         return None, None
 
 def resize_prediction_to_original(prediction, original_size, target_size):
@@ -254,7 +274,6 @@ def resize_prediction_to_original(prediction, original_size, target_size):
     
     return prediction_resized
 
-# Example usage function
 def complete_prediction_pipeline(model, image, device, target_size=(512, 512)):
     """
     Complete pipeline: preprocess -> predict -> resize back to original
@@ -269,64 +288,6 @@ def complete_prediction_pipeline(model, image, device, target_size=(512, 512)):
     final_prediction = resize_prediction_to_original(prediction, original_size, target_size)
     
     return final_prediction
-
-# Debug function to check image dimensions
-def debug_image_shape(image):
-    """Debug function to check image shapes at each step"""
-    print("=== Image Shape Debug ===")
-    
-    if isinstance(image, str):
-        img = Image.open(image)
-        print(f"Original file size: {img.size}")  # (width, height)
-        img_array = np.array(img)
-    elif isinstance(image, np.ndarray):
-        img_array = image
-        print(f"Input numpy array shape: {img_array.shape}")
-    else:
-        img_array = np.array(image)
-        print(f"Input PIL image size: {image.size}")
-    
-    print(f"Array shape: {img_array.shape}")
-    print(f"Array dtype: {img_array.dtype}")
-    print(f"Array min/max: {img_array.min()}/{img_array.max()}")
-    
-    return img_array
-
-
-def predict_image(model, image_tensor, device):
-    """Make prediction using the loaded model"""
-    try:
-        with torch.no_grad():
-            image_tensor = image_tensor.to(device)
-            
-            # Forward pass
-            outputs = model(image_tensor)
-            
-            # Handle different output formats
-            if isinstance(outputs, dict):
-                if 'out' in outputs:
-                    outputs = outputs['out']
-                elif 'logits' in outputs:
-                    outputs = outputs['logits']
-                else:
-                    outputs = list(outputs.values())[0]
-            elif isinstance(outputs, (list, tuple)):
-                outputs = outputs[0]
-            
-            # Ensure outputs have the right shape
-            if len(outputs.shape) == 3:
-                outputs = outputs.unsqueeze(0)
-            
-            # Since your model uses softmax2d activation, outputs are already probabilities
-            # Just get the class predictions
-            predictions = torch.argmax(outputs, dim=1)
-            
-            return predictions.cpu().numpy(), outputs.cpu().numpy()
-            
-    except Exception as e:
-        st.error(f"Error during prediction: {str(e)}")
-        st.info("Please check if your model architecture matches the expected input format.")
-        return None, None
 
 def colorize_prediction(prediction, color_map):
     """Convert prediction mask to colored image"""
@@ -435,15 +396,27 @@ activation = st.sidebar.selectbox(
 num_classes = st.sidebar.number_input(
     "Number of Classes", 
     min_value=1, max_value=20, value=7,
-    help="Number of output classes in your model (len(select_classes))"
+    help="Number of output classes in your model"
 )
 
 # Model upload
 uploaded_model = st.sidebar.file_uploader(
     "Upload your trained DeepLab model (.pth)", 
     type=['pth'],
-    help="Upload your trained DeepLab model file"
+    help="Upload your trained DeepLab model file (preferably saved as state_dict)"
 )
+
+# Add important note about model saving
+st.sidebar.info("""
+**Important:** For best compatibility, ensure your model was saved using:
+```python
+torch.save(model.state_dict(), 'model.pth')
+```
+rather than:
+```python
+torch.save(model, 'model.pth')
+```
+""")
 
 if uploaded_model is not None:
     # Save uploaded model temporarily
@@ -453,11 +426,6 @@ if uploaded_model is not None:
     
     # Load model with architecture parameters
     with st.spinner("Loading model..."):
-        # Store architecture info in session state for model loading
-        st.session_state.encoder_name = encoder_name
-        st.session_state.num_classes = num_classes
-        st.session_state.activation = activation
-        
         model, device = load_model(model_path, encoder_name, num_classes, activation)
     
     if model is not None:
@@ -491,16 +459,14 @@ if uploaded_model is not None:
                 
                 with col1:
                     st.subheader("Original Image")
-                    st.image(image, use_column_width=True)
+                    st.image(image, use_container_width=True)  # Fixed deprecated parameter
                 
                 # Preprocess and predict
                 with st.spinner("Processing image..."):
                     try:
-                        # Use the fixed preprocessing function
-                        # target_size should be divisible by 16
-                        target_size = (512, 512)  # or (416, 416), (608, 608), etc.
+                        # Use the complete pipeline
+                        target_size = (512, 512)  # Divisible by 16
                         
-                        # Option 1: Use the complete pipeline (recommended)
                         pred_mask = complete_prediction_pipeline(model, image, device, target_size)
                         
                         if pred_mask is not None:
@@ -508,8 +474,8 @@ if uploaded_model is not None:
                             colored_pred = colorize_prediction(pred_mask, COLOR_MAP)
                             
                             with col2:
-                                st.subheader("Segmentation Result")
-                                st.image(colored_pred, use_column_width=True)
+                                st.subheader("Land Cover Prediction")
+                                st.image(colored_pred, use_container_width=True)  # Fixed deprecated parameter
                                 
                         else:
                             st.error("Failed to make prediction. Please check your model and try again.")
@@ -517,14 +483,7 @@ if uploaded_model is not None:
                             
                     except Exception as e:
                         st.error(f"Error during prediction: {str(e)}")
-                        # Debug information
-                        st.write("Debug info:")
-                        debug_image_shape(image)
                         st.stop()
-                
-                with col2:
-                    st.subheader("Land Cover Prediction")
-                    st.image(colored_pred, use_column_width=True)
                 
                 # Class distribution
                 st.subheader("Land Cover Distribution")
@@ -636,33 +595,37 @@ if uploaded_model is not None:
                     results = []
                     
                     for i, file in enumerate(uploaded_files):
-                        image = Image.open(file).convert('RGB')
-                        image_tensor = preprocess_image(image, encoder_name, 'imagenet')
-                        result = predict_image(model, image_tensor, device)
-                        
-                        if result[0] is not None:
-                            predictions, _ = result
-                            pred_mask = predictions[0]
-                            distribution = get_class_distribution(pred_mask)
+                        try:
+                            image = Image.open(file).convert('RGB')
+                            pred_mask = complete_prediction_pipeline(model, image, device, (512, 512))
                             
-                            results.append({
-                                'filename': file.name,
-                                **distribution
-                            })
+                            if pred_mask is not None:
+                                distribution = get_class_distribution(pred_mask)
+                                
+                                results.append({
+                                    'filename': file.name,
+                                    **distribution
+                                })
+                            else:
+                                st.warning(f"Failed to process {file.name}")
+                        
+                        except Exception as e:
+                            st.error(f"Error processing {file.name}: {str(e)}")
                         
                         progress_bar.progress((i + 1) / len(uploaded_files))
                     
-                    # Display results table
-                    import pandas as pd
-                    results_df = pd.DataFrame(results)
-                    st.subheader("Batch Analysis Results")
-                    st.dataframe(results_df)
-                    
-                    # Summary statistics
-                    st.subheader("Summary Statistics")
-                    numeric_cols = [col for col in results_df.columns if col != 'filename']
-                    summary_stats = results_df[numeric_cols].describe()
-                    st.dataframe(summary_stats)
+                    if results:
+                        # Display results table
+                        results_df = pd.DataFrame(results)
+                        st.subheader("Batch Analysis Results")
+                        st.dataframe(results_df, use_container_width=True)  # Fixed deprecated parameter
+                        
+                        # Summary statistics
+                        st.subheader("Summary Statistics")
+                        numeric_cols = [col for col in results_df.columns if col != 'filename']
+                        if numeric_cols:
+                            summary_stats = results_df[numeric_cols].describe()
+                            st.dataframe(summary_stats, use_container_width=True)  # Fixed deprecated parameter
 
 else:
     st.sidebar.warning("Please upload your trained DeepLab model to begin analysis")
@@ -687,9 +650,19 @@ else:
     - USGS EarthExplorer
     
     ### Requirements:
-    - Trained DeepLab model (.pth file)
+    - Trained DeepLab model (.pth file, preferably saved as state_dict)
     - Satellite imagery of Borneo region
     - Google Earth Engine account (optional, for automatic downloads)
+    
+    ### Model Compatibility:
+    For best results, save your model using:
+    ```python
+    # Recommended method
+    torch.save(model.state_dict(), 'model.pth')
+    
+    # Instead of
+    torch.save(model, 'model.pth')  # May cause loading issues
+    ```
     """)
 
 # Footer
