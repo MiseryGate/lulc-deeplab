@@ -1,9 +1,10 @@
+opencv-python-headless
 tensorflow
 folium
 streamlit
 torch
 torchvision
-pillow
+Pillow
 numpy
 matplotlib
 earthengine-api
