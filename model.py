@@ -131,41 +131,63 @@ def load_model(model_path, encoder_name="mobilenet_v2", num_classes=7, activatio
         st.error(f"General error loading model: {str(e)}")
         return None, None
 
-def preprocess_image(image, encoder_name='mobilenet_v2', encoder_weights='imagenet', target_size=(512, 512)):
-    """Preprocess image for model prediction using SMP preprocessing"""
-    if isinstance(image, np.ndarray):
-        image = Image.fromarray(image)
+def preprocess_image(image, target_size=(512, 512)):
+    """
+    Preprocess image for DeepLabV3Plus model
     
-    # Resize image
-    image = image.resize(target_size, Image.BILINEAR)
-    image_np = np.array(image)
+    Args:
+        image: PIL Image, numpy array, or file path
+        target_size: tuple (height, width) - must be divisible by 16
     
-    # Get SMP preprocessing function
-    try:
-        import segmentation_models_pytorch as smp
-        preprocessing_fn = smp.encoders.get_preprocessing_fn(encoder_name, encoder_weights)
-        
-        # Apply preprocessing
-        preprocessed = preprocessing_fn(image_np)
-        
-        # Convert to tensor
-        image_tensor = torch.from_numpy(preprocessed).float()
-        
-        # Add batch dimension
-        if len(image_tensor.shape) == 3:
-            image_tensor = image_tensor.unsqueeze(0)
-            
-        return image_tensor
-        
-    except ImportError:
-        st.warning("Using standard preprocessing as SMP is not available")
-        # Fallback to standard preprocessing
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
-        return transform(image).unsqueeze(0)
+    Returns:
+        preprocessed_tensor: torch tensor ready for model
+        original_size: tuple of original (height, width) for post-processing
+    """
+    
+    # Ensure target size is divisible by 16
+    h, w = target_size
+    h = ((h + 15) // 16) * 16  # Round up to nearest multiple of 16
+    w = ((w + 15) // 16) * 16
+    target_size = (h, w)
+    
+    # Handle different input types
+    if isinstance(image, str):
+        # If it's a file path
+        image = Image.open(image).convert('RGB')
+    elif isinstance(image, np.ndarray):
+        # If it's a numpy array
+        if len(image.shape) == 3:
+            # Convert BGR to RGB if needed (OpenCV uses BGR)
+            if image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(image.astype(np.uint8))
+    elif not isinstance(image, Image.Image):
+        raise ValueError("Image must be PIL Image, numpy array, or file path")
+    
+    # Store original size for later use
+    original_size = image.size  # PIL returns (width, height)
+    original_size = (original_size[1], original_size[0])  # Convert to (height, width)
+    
+    # Resize image to target size
+    image = image.resize((target_size[1], target_size[0]), Image.BILINEAR)  # PIL resize takes (width, height)
+    
+    # Convert to numpy array
+    image_array = np.array(image)
+    
+    # Normalize to [0, 1] range
+    image_array = image_array.astype(np.float32) / 255.0
+    
+    # Convert to tensor and add batch dimension
+    # Shape should be (1, 3, height, width)
+    image_tensor = torch.from_numpy(image_array)
+    image_tensor = image_tensor.permute(2, 0, 1)  # HWC to CHW
+    image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension
+    
+    print(f"Preprocessed image shape: {image_tensor.shape}")
+    print(f"Target size: {target_size}")
+    
+    return image_tensor, original_size
+
 
 def predict_image(model, image_tensor, device):
     """Make prediction using the loaded model"""
