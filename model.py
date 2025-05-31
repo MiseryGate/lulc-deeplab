@@ -13,6 +13,7 @@ from io import BytesIO
 import cv2
 from datetime import datetime, timedelta
 import os
+from segmentation_models_pytorch.decoders.deeplabv3.model import DeepLabV3Plus
 
 # Set page config
 st.set_page_config(
@@ -44,17 +45,32 @@ COLOR_MAP = [
 ]
 
 @st.cache_resource
+# def load_model(model_path):
+#     """Load the trained DeepLab model"""
+#     try:
+#         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#         model = torch.load(model_path, map_location=device)
+#         model.eval()
+#         return model, device
+#     except Exception as e:
+#         st.error(f"Error loading model: {str(e)}")
+#         return None, None
 def load_model(model_path):
-    """Load the trained DeepLab model"""
+    """Load the trained DeepLab model safely with PyTorch 2.6+"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = torch.load(model_path, map_location=device)
+
+        # Add DeepLabV3Plus to the allowlist for safe deserialization
+        torch.serialization.add_safe_globals([DeepLabV3Plus])
+
+        # Load the full model, assuming it was saved with torch.save(model)
+        model = torch.load(model_path, map_location=device, weights_only=False)
         model.eval()
         return model, device
+
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None, None
-
 def preprocess_image(image, target_size=(512, 512)):
     """Preprocess image for model prediction"""
     if isinstance(image, np.ndarray):
