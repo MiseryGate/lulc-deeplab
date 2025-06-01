@@ -79,14 +79,13 @@ def fix_encoder_compatibility(model, encoder_name):
 
 @st.cache_resource
 def load_model_from_folder(model_name, encoder_name=DEFAULT_ENCODER, num_classes=DEFAULT_CLASSES):
-    """Load model from models folder"""
+    """Load model from ./model folder"""
     try:
-        model_path = os.path.join(MODEL_FOLDER, model_name)
+        model_path = os.path.join("./model", model_name)
         if not os.path.exists(model_path):
             return None, None, f"Model file not found: {model_path}"
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
         import segmentation_models_pytorch as smp
         
         # Load checkpoint
@@ -114,7 +113,6 @@ def load_model_from_folder(model_name, encoder_name=DEFAULT_ENCODER, num_classes
                 test_output = model(dummy_input)
             
             return model, device, None
-            
         except:
             # Load as state dict
             model = smp.DeepLabV3Plus(
@@ -148,13 +146,15 @@ def load_model_from_folder(model_name, encoder_name=DEFAULT_ENCODER, num_classes
     except Exception as e:
         return None, None, f"Error loading model: {str(e)}"
 
+
 def get_available_models():
-    """Get list of available model files"""
-    if not os.path.exists(MODEL_FOLDER):
-        os.makedirs(MODEL_FOLDER)
+    """Get list of available model files from ./model folder"""
+    model_folder = "./model"
+    if not os.path.exists(model_folder):
+        os.makedirs(model_folder)
         return []
     
-    model_files = glob.glob(os.path.join(MODEL_FOLDER, "*.pth"))
+    model_files = glob.glob(os.path.join(model_folder, "*.pth"))
     return [os.path.basename(f) for f in model_files]
 
 def preprocess_image(image, target_size=(512, 512)):
