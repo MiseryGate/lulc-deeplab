@@ -178,9 +178,10 @@ def preprocess_image(image, target_size=(512, 512)):
     
     # Resize and normalize
     image_resized = image.resize((target_size[1], target_size[0]), Image.BILINEAR)
-    image_array = np.array(image_resized).astype(np.float32) / 255.0
+    image_array = np.array(image_resized).astype(np.float32)
     
     # ImageNet normalization
+    image_array = image_array / 255.0
     mean = np.array([0.485, 0.456, 0.406])
     std = np.array([0.229, 0.224, 0.225])
     image_array = (image_array - mean) / std
