@@ -248,7 +248,7 @@ def get_class_distribution(pred_categorical):
     return distribution
 
 # Main App
-st.title("🌿 DeepLab Borneo Land Cover Prediction")
+st.title("🌿 Land Cover Prediction")
 
 # Model selection
 st.sidebar.header("Model Selection")
@@ -384,4 +384,4 @@ with tab2:
                     st.dataframe(summary_stats, use_container_width=True)
 
 st.markdown("---")
-st.markdown("🌿 **DeepLab Borneo Land Cover Analysis**")
+st.markdown("🌿 **Land Cover Analysis**")
